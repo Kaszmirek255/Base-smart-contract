@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.23;
+
+/// @title BaseSafeVault — prosty bezpieczny vault (deposit/withdraw/pause, reentrancy guard)
+/// @notice Jednoplikowy kontrakt przygotowany do deployu na Base i weryfikacji Single file.
+contract BaseSafeVault {
+    // --- Owner
+    address public owner;
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    // --- Pausable
+    bool public paused;
+    event Paused(address indexed by);
+    event Unpaused(address indexed by);
+
+    // --- Vault state
+    mapping(address => uint256) private _balances;
+    event Deposit(address indexed who, uint256 amount);
+    event Withdraw(address indexed who, address indexed to, uint256 amount);
+    event EmergencyWithdraw(address indexed by, address indexed to, uint256 amount);
+
+    // --- Reentrancy guard
+    uint256 private _status;
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+
+    modifier nonReentrant() {
+        require(_status == _NOT_ENTERED, "reentrant");
+        _status = _ENTERED;
+        _;
+        _status = _NOT_ENTERED;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "not owner");
+        _;
+    }
+
+    modifier whenNotPaused() {
+        require(!paused, "paused");
+        _;
+    }
+
+    constructor() {
+        owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
+        paused = false;
+        _status = _NOT_ENTERED;
+    }
+
+    // --- Ownership
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "zero");
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
+
+    // --- Pause controls
+    function pause() external onlyOwner {
+        require(!paused, "already paused");
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external onlyOwner {
+        require(paused, "already unpaused");
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
+
+    // --- Deposits
+    /// @notice Deposit ETH into your balance
+    function deposit() external payable whenNotPaused {
+        require(msg.value > 0, "zero");
+        _balances[msg.sender] += msg.value;
+        emit Deposit(msg.sender, msg.value);
+    }
+
+    /// @notice Fallback receive -> treat as deposit
+    receive() external payable {
+        require(msg.value > 0, "zero");
+        _balances[msg.sender] += msg.value;
+        emit Deposit(msg.sender, msg.value);
+    }
+
+    // --- Withdrawals (user)
+    /// @notice Withdraw your funds to an address `to`
+    function withdraw(uint256 amount, address payable to) external nonReentrant whenNotPaused {
+        require(amount > 0, "zero");
+        uint256 bal = _balances[msg.sender];
+        require(bal >= amount, "insufficient");
+        // effects
+        _balances[msg.sender] = bal - amount;
+        // interaction
+        (bool ok, ) = to.call{value: amount}("");
+        require(ok, "transfer failed");
+        emit Withdraw(msg.sender, to, amount);
+    }
+
+    // --- Owner emergency operations
+    /// @notice Owner can withdraw contract balance to `to`
+    function withdrawByOwner(uint256 amount, address payable to) external onlyOwner nonReentrant {
+        require(amount > 0, "zero");
+        uint256 contractBal = address(this).balance;
+        require(contractBal >= amount, "insufficient contract balance");
+        (bool ok, ) = to.call{value: amount}("");
+        require(ok, "transfer failed");
+        emit EmergencyWithdraw(msg.sender, to, amount);
+    }
+
+    /// @notice Owner sweep all funds (emergency)
+    function emergencySweep(address payable to) external onlyOwner nonReentrant {
+        uint256 contractBal = address(this).balance;
+        require(contractBal > 0, "empty");
+        (bool ok, ) = to.call{value: contractBal}("");
+        require(ok, "transfer failed");
+        emit EmergencyWithdraw(msg.sender, to, contractBal);
+    }
+
+    // --- Views
+    function balanceOf(address who) external view returns (uint256) {
+        return _balances[who];
+    }
+
+    function contractBalance() external view returns (uint256) {
+        return address(this).balance;
+    }
+}
